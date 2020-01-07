@@ -26,7 +26,7 @@ transform (SList (SAtom (ASymbol s) : xs))
 transform (SList xs) = unwords $ map (\s -> "(" ++ (transform s) ++ ")") xs
 
 main = do source <- getContents
-          let presult = readP_to_S parseSExpr source
+          let presult = readP_to_S parseProgram source
 --          hPutStrLn stderr $ show presult
           case presult of
             ((res, "") : _) -> do putStrLn $ "import Data.IORef"

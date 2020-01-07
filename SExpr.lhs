@@ -1,4 +1,5 @@
 > module SExpr where
+> import GHC.Unicode (isSpace)
 > import Text.ParserCombinators.ReadP
 
 Let's define an Atom as either a symbol (like this-symbol), an int (like 42) or a string (like "this").
@@ -27,8 +28,8 @@ Again, implement Show to yield an equivalent output.
 Now define parsers for the different Atom cases.
 
 > parseASymbol :: ReadP Atom
-> parseASymbol = do c1 <- satisfy $ \c -> not $ any (==c) " ()\n\r\t\v0123456789\""
->                   s <- many $ satisfy $ \c -> not $ any (==c) " ()\n\r\t\v"
+> parseASymbol = do c1 <- satisfy $ \c -> not $ (isSpace c) || any (==c) "()0123456789\""
+>                   s <- many $ satisfy $ \c -> not $ (isSpace c) || any (==c) "()\""
 >                   return $ ASymbol $ c1 : s
 
 > parseAInt :: ReadP Atom
@@ -56,7 +57,7 @@ Now define parsers for the two cases of SExpr and for SExpr itself.
 
 > parseSList :: ReadP SExpr
 > parseSList = do char '('
->                 l <- sepBy parseSExpr $ munch1 (== ' ')
+>                 l <- sepBy parseSExpr $ munch1 isSpace
 >                 skipSpaces
 >                 char ')'
 >                 return $ SList l
@@ -64,4 +65,9 @@ Now define parsers for the two cases of SExpr and for SExpr itself.
 > parseSExpr :: ReadP SExpr
 > parseSExpr = do skipSpaces
 >                 choice [parseSAtom, parseSList]
+
+> parseProgram :: ReadP SExpr
+> parseProgram = do s <- parseSExpr
+>                   skipSpaces
+>                   return s
 
