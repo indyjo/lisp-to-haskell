@@ -10,11 +10,17 @@ transform (SAtom a)  = tf a
         tf (AString s) = show s
 
 transform (SList []) = "()"
+
 transform (SList (SAtom (ASymbol "do") : xs)) = "do {" ++ doTuples ++ "}"
   where
     doTuple (SList [(SAtom (ASymbol "_")), s]) = transform s
     doTuple (SList [(SAtom (ASymbol v)), s]) = v ++ " <- " ++ transform s
     doTuples = intercalate "; " $ map doTuple xs
+
+transform (SList (SAtom (ASymbol "if") : xs)) = case xs of
+   (_cond : _then : _else : []) -> "if (" ++ transform _cond ++ ") then (" ++ transform _then ++ ") else (" ++ transform _else ++ ")"
+   _ -> error "if must have three arguments"
+
 transform (SList (SAtom (ASymbol s) : xs))
    | s == "alloc"        = replace "newIORef"
    | s == "get"          = replace "readIORef"
