@@ -47,7 +47,7 @@ And a parser for Atoms in every case. Note how ambiguities are resolved using th
 
 > parseAtom :: ReadP Atom
 > parseAtom = do skipSpaces
->                choice [parseAInt <++ parseAString <++ parseASymbol]
+>                parseAInt <++ parseAString <++ parseASymbol
 
 Now define parsers for the two cases of SExpr and for SExpr itself.
 
