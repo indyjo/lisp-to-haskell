@@ -1,11 +1,12 @@
 (do
-	(n (alloc 0))
-	(cond_action (compute (do
-		(nv (get n))
-		(_ (compute (< nv 3))))))
-	(_ (while cond_action (do
-		(_ (log "Your name: "))
-		(name getLine)
-		(_ (log (<> "Hello, " name)))
-		(_ (update n (+ 1))))))
+	(n	(alloc 0))
+	(_	(while
+		(do
+			(x	(get n))
+			(_	(compute (< x 3))))
+		(do
+			(_	(log "Your name: "))
+			(name	getLine)
+			(_	(log (<> "Hello, " name)))
+			(_	(update n (+ 1))))))
 )
