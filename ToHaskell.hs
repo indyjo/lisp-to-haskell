@@ -28,6 +28,7 @@ transform (SList (SAtom (ASymbol s) : xs))
    | s == "update"       = replace "modifyIORef"
    | s == "compute"      = replace "return"
    | s == "while"        = replace "whileM_"
+   | s == "log"          = replace "putStrLn"
   where replace s' = transform $ SList $ (SAtom $ ASymbol s') : xs
 transform (SList xs) = unwords $ map (\s -> "(" ++ (transform s) ++ ")") xs
 
