@@ -65,6 +65,14 @@ transform c (SList (SAtom (ASymbol "if") : xs)) = case xs of
   where
     t e = transform c e
 
+-- (fun ...) lambdas.
+transform c (SList (SAtom (ASymbol "fun") : xs)) = case xs of
+  ((SList vars) : expr : []) -> let
+      tvars = unwords $ map (\e -> case e of (SAtom (ASymbol name)) -> name) vars
+    in "\\" ++ tvars ++ " -> (" ++ transform c expr ++ ")"
+  otherwise                  -> error "Invalid lambda"
+  
+
 -- Some functions have corresponding PureScript versions
 transform c (SList (SAtom (ASymbol s) : xs))
    | s == "alloc"        = replace "new"
