@@ -10,14 +10,16 @@ while p f = go
              else return ()
 -- Start of actual program --
 main = do
-    n <- (newIORef) (0 :: Int)
+    r <- (newIORef) (1 :: Int)
+    n <- (newIORef) (6 :: Int)
     (while) (do
-        x <- (readIORef) (n)
-        (return) ((<) (x) (3 :: Int))
+        v <- (readIORef) (n)
+        (return) ((>) (v) (1 :: Int))
       ) (do
-        (putStrLn) ("Your name: ")
-        name <- getLine
-        (putStrLn) ((<>) ("Hello, ") (name))
-        (modifyIORef) (n) ((+) (1 :: Int))
+        v <- (readIORef) (n)
+        (modifyIORef) (r) ((*) (v))
+        (modifyIORef) (n) ((+) ((-1 :: Int)))
       )
+    f <- (readIORef) (r)
+    (putStrLn) ((show) (f))
   
