@@ -1,5 +1,7 @@
 module Types where
 import Control.Monad (forM, forM_)
+import Control.Monad.Trans.Except (ExceptT, catchE, runExceptT, throwE)
+import Control.Monad.State.Lazy (State, get, runState)
 import Data.Either
 import Data.Map (Map)
 import qualified Data.Map as Map
@@ -37,32 +39,39 @@ freeVars (TForall n t) = filter (/= n) (freeVars t)
 type Env = Map String Type
 type Error = String
 
-typeof :: Env -> SExpr -> Either Error Type
-typeof _   (S.SAtom (S.AInt _))    = Right $ TSymbol "Int"
-typeof _   (S.SAtom (S.AString _)) = Right $ TParam $ [TSymbol "List", TSymbol "Char"] -- a List of Char
-typeof env (S.SAtom (S.ASymbol s)) = case answer of
-    Just t  -> Right t
-    Nothing -> Left $ "No type known for symbol " ++ s
-  where answer = Map.lookup s env
+-- The monad that typeof will operate in.
+-- Supports exceptions and passing the environment as state.
+type Infer = ExceptT Error (State Env)
+
+lookupEnv :: String -> Infer Type
+lookupEnv s = do
+  env <- get
+  case Map.lookup s env of
+    Just t  -> return t
+    Nothing -> throwE $ "No type known for symbol " ++ s
+
+
+typeof :: SExpr -> Infer Type
+typeof (S.SAtom (S.AInt _))    = return $ TSymbol "Int"
+typeof (S.SAtom (S.AString _)) = return $ TParam $ [TSymbol "List", TSymbol "Char"] -- a List of Char
+typeof (S.SAtom (S.ASymbol s)) = lookupEnv s
 
 -- Type of function application (f x y)
 -- This function uses the fact that Either is a monad, and thus "do" notation can be used.
-typeof env exp@(S.SList (func:params)) = go
+typeof exp@(S.SList (func:params)) = go
   where
-    go = case result of
-      Left err -> Left $ "Error in " ++ show exp ++ ": " ++ err
-      Right t -> Right t
+    go = result `catchE` \err -> throwE $ "Error in " ++ show exp ++ ": " ++ err
     
-    result :: Either Error Type
+    result :: Infer Type
     result = do
       -- Get the type of the function
-      funcType <- typeof env func
+      funcType <- typeof func
       -- The function should be of type (-> T1 ... TN R).
       -- Extract those type parameters, i.e. the expected types of the function's arguments
       -- and the function's return type
       funcTypeParams <- getFuncTypeParams funcType
       -- Get the types of the actual arguments
-      actualParamTypes <- forM params (typeof env)
+      actualParamTypes <- forM params typeof
       -- Check that formal and actual arguments have same size
       let nExp = (length funcTypeParams) - 1
           nAct = length actualParamTypes
@@ -73,16 +82,16 @@ typeof env exp@(S.SList (func:params)) = go
       -- Result type is determined by the function's last function type parameter
       return $ last funcTypeParams
     
-    verify :: Bool -> Error -> Either Error ()
-    verify b e = if b then return () else (Left e)
+    verify :: Bool -> Error -> Infer ()
+    verify b e = if b then return () else (throwE e)
 
-    getFuncTypeParams :: Type -> Either Error [Type]
+    getFuncTypeParams :: Type -> Infer [Type]
     getFuncTypeParams t = 
       case t of
         TParam (arrow : funcTypeParams) -> return funcTypeParams
-        otherwise -> Left $ "Not a function. Its type is: " ++ show t
+        otherwise -> throwE $ "Not a function. Its type is: " ++ show t
     
-    matchTypes :: Type -> Type -> Either Error ()
+    matchTypes :: Type -> Type -> Infer ()
     matchTypes a b = verify (a == b) ("Types don't match: " ++ show a ++ " /= " ++ show b)
 
 exampleEnv = Map.fromList
@@ -115,5 +124,7 @@ exampleExprs =
   , S.SList [ S.SAtom $ S.ASymbol "id", S.SAtom $ S.ASymbol "n" ]
   ]
 
-exampleTypes = map (typeof exampleEnv) exampleExprs
+exampleTypes = map (\e -> (\(t, _) -> t) $ runState (runExceptT $ typeof e) exampleEnv) exampleExprs
+
+example = putStrLn $ unlines $ map show $ zip exampleExprs exampleTypes
 
