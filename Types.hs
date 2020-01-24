@@ -1,4 +1,4 @@
-module Types where
+module Types (Type, Env, Error, Infer, typeOf) where
 import Control.Monad (forM, forM_)
 import Control.Monad.Trans.Except (ExceptT, catchE, runExceptT, throwE)
 import Control.Monad.State.Lazy (State, get, runState)
@@ -30,9 +30,15 @@ tDouble = TSymbol "Double"
 tList t = TParam $ TSymbol "List" : [ t ]
 tString = tList tChar
 
--- Given a type expression, return any unbound names in the order of use. Names might appear twice.
+-- type variable must begin with lower-case letters
+isTypeVar :: String -> Bool
+isTypeVar (n:ns) = n >= 'a' && n <= 'z'
+isTypeVar _ = False
+
+-- Given a type expression, return any unbound type variable names in the order of use. Names might appear twice.
 freeVars :: Type -> [String]
-freeVars (TSymbol n)   = [n]
+freeVars (TSymbol n) | isTypeVar n = [n]
+                     | otherwise   = []
 freeVars (TParam ts)   = concat $ map freeVars ts
 freeVars (TForall n t) = filter (/= n) (freeVars t)
 
@@ -51,34 +57,45 @@ lookupEnv s = do
     Nothing -> throwE $ "No type known for symbol " ++ s
 
 
-typeof :: SExpr -> Infer Type
-typeof (S.SAtom (S.AInt _))    = return $ TSymbol "Int"
-typeof (S.SAtom (S.AString _)) = return $ TParam $ [TSymbol "List", TSymbol "Char"] -- a List of Char
-typeof (S.SAtom (S.ASymbol s)) = lookupEnv s
+typeofM :: SExpr -> Infer Type
 
--- Type of function application (f x y)
--- This function uses the fact that Either is a monad, and thus "do" notation can be used.
-typeof exp@(S.SList (func:params)) = go
+-- type of an integer literal
+typeofM (S.SAtom (S.AInt _))    = return $ TSymbol "Int"
+
+-- Type of a string literal
+typeofM (S.SAtom (S.AString _)) = return $ TParam $ [TSymbol "List", TSymbol "Char"] -- a List of Char
+
+-- Type of a symbol
+typeofM (S.SAtom (S.ASymbol s)) = lookupEnv s
+
+-- Type of ()
+typeofM (S.SList []) = return $ TSymbol "()"
+
+-- type of a redundant pair of parentheses (e)
+typeofM (S.SList [e]) = typeofM e
+
+-- Type of function application (f x) or (f x y) ...
+typeofM exp@(S.SList (func:params)) = go
   where
     go = result `catchE` \err -> throwE $ "Error in " ++ show exp ++ ": " ++ err
     
     result :: Infer Type
     result = do
       -- Get the type of the function
-      funcType <- typeof func
+      funcType <- typeofM func
       -- The function should be of type (-> T1 ... TN R).
       -- Extract those type parameters, i.e. the expected types of the function's arguments
       -- and the function's return type
       funcTypeParams <- getFuncTypeParams funcType
       -- Get the types of the actual arguments
-      actualParamTypes <- forM params typeof
+      actualParamTypes <- forM params typeofM
       -- Check that formal and actual arguments have same size
       let nExp = (length funcTypeParams) - 1
           nAct = length actualParamTypes
         in verify (nExp == nAct)
                   ("Function expects " ++ show nExp ++ " arguments, but only " ++ show nAct ++ " given.")
       -- Match formal and actual argument types
-      forM_ (zip funcTypeParams actualParamTypes) (\(a,b)->matchTypes a b)
+      forM_ (zip funcTypeParams actualParamTypes) (\(a,b) -> unify a b)
       -- Result type is determined by the function's last function type parameter
       return $ last funcTypeParams
     
@@ -90,9 +107,21 @@ typeof exp@(S.SList (func:params)) = go
       case t of
         TParam (arrow : funcTypeParams) -> return funcTypeParams
         otherwise -> throwE $ "Not a function. Its type is: " ++ show t
-    
-    matchTypes :: Type -> Type -> Infer ()
-    matchTypes a b = verify (a == b) ("Types don't match: " ++ show a ++ " /= " ++ show b)
+
+-- non-monadic wrapper around typeofM
+typeOf :: Env -> SExpr -> Either Error Type
+typeOf env expr = result
+  where
+    (result, _) = runState (runExceptT (typeofM expr)) env
+
+unify :: Type -> Type -> Infer ()
+unify (TParam (TSymbol "->" : xs)) (TParam (TSymbol "->" : ys)) = do
+  forM_ (zip xs ys) (\(x, y) -> unify x y)
+
+unify x y | x == y    = return ()
+
+
+unify x y = throwE $ "Types don't match: " ++ show x ++ " <-> " ++ show y
 
 exampleEnv = Map.fromList
   [ ("n", tInt)
@@ -124,7 +153,7 @@ exampleExprs =
   , S.SList [ S.SAtom $ S.ASymbol "id", S.SAtom $ S.ASymbol "n" ]
   ]
 
-exampleTypes = map (\e -> (\(t, _) -> t) $ runState (runExceptT $ typeof e) exampleEnv) exampleExprs
+exampleTypes = map (typeOf exampleEnv) exampleExprs
 
 example = putStrLn $ unlines $ map show $ zip exampleExprs exampleTypes
 
