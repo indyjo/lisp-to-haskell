@@ -1,10 +1,10 @@
 module Types (Type, Env, Error, Infer, typeOf) where
 import Control.Monad (forM, forM_)
 import Control.Monad.Trans.Except (ExceptT, catchE, runExceptT, throwE)
-import Control.Monad.State.Lazy (State, get, runState)
+import Control.Monad.State.Lazy (State, get, put, modify, runState)
 import Data.Either
-import Data.Map (Map)
-import qualified Data.Map as Map
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import SExpr (SExpr)
 import qualified SExpr as S
 
@@ -42,20 +42,56 @@ freeVars (TSymbol n) | isTypeVar n = [n]
 freeVars (TParam ts)   = concat $ map freeVars ts
 freeVars (TForall n t) = filter (/= n) (freeVars t)
 
+-- Given a type that contains free type variables, returns a closed corresponding forall type.
+closeOver :: Type -> Type
+closeOver t = case freeVars t of
+  (n:_)     -> closeOver (TForall n t)
+  otherwise -> t
+
 type Env = Map String Type
+type Subst = Map String Type
 type Error = String
+
+initSubst :: Subst
+initSubst = Map.empty
+
+data InferState = InferState { env :: Env, count :: Int, subst :: Subst }
 
 -- The monad that typeof will operate in.
 -- Supports exceptions and passing the environment as state.
-type Infer = ExceptT Error (State Env)
+type Infer = ExceptT Error (State InferState)
 
 lookupEnv :: String -> Infer Type
 lookupEnv s = do
-  env <- get
+  InferState { env = env } <- get
   case Map.lookup s env of
     Just t  -> return t
     Nothing -> throwE $ "No type known for symbol " ++ s
 
+newTypeVar :: Infer String
+newTypeVar = do
+  s <- get
+  let n  = "t" ++ show (count s)
+      s' = s { count = count s + 1 }
+  put s'
+  return n
+
+replaceVar :: String -> Type -> Type -> Type
+replaceVar oldN newT t = case t of
+    TParam ts    -> TParam $ map recurse ts
+    TForall n t' -> if n == oldN then t else TForall n (recurse t')
+    TSymbol n    -> if n == oldN then newT else t
+  where
+    recurse = replaceVar oldN newT
+
+-- When encountering a Forall type, we have to substitute its type variables by free variables
+eliminateForall :: Type -> Infer Type
+eliminateForall (TForall n t) = do
+  n' <- newTypeVar
+  let t' = replaceVar n (TSymbol n') t
+  eliminateForall t'
+
+eliminateForall t = return t
 
 typeofM :: SExpr -> Infer Type
 
@@ -65,8 +101,10 @@ typeofM (S.SAtom (S.AInt _))    = return $ TSymbol "Int"
 -- Type of a string literal
 typeofM (S.SAtom (S.AString _)) = return $ TParam $ [TSymbol "List", TSymbol "Char"] -- a List of Char
 
--- Type of a symbol
-typeofM (S.SAtom (S.ASymbol s)) = lookupEnv s
+-- Type of a symbol. Eliminate any Forall types.
+typeofM (S.SAtom (S.ASymbol s)) = do
+  t <- lookupEnv s
+  eliminateForall t
 
 -- Type of ()
 typeofM (S.SList []) = return $ TSymbol "()"
@@ -112,16 +150,29 @@ typeofM exp@(S.SList (func:params)) = go
 typeOf :: Env -> SExpr -> Either Error Type
 typeOf env expr = result
   where
-    (result, _) = runState (runExceptT (typeofM expr)) env
+    (preresult, InferState { subst = substitutions }) = runState (runExceptT (typeofM expr)) $ InferState { env = env, count = 0, subst = initSubst }
+    result = fmap (closeOver . applySubstitutions substitutions) preresult
+    applySubstitutions s t = Map.foldrWithKey (\name subst accum -> replaceVar name subst accum) t s
+
+constrain :: String -> Type -> Infer ()
+constrain n t = do
+  InferState { subst = s } <- get
+  case Map.lookup n s of
+    Nothing -> do
+      modify (\s -> s { subst = Map.insert n t (subst s) })
+    Just t' -> do
+      unify t t'
 
 unify :: Type -> Type -> Infer ()
-unify (TParam (TSymbol "->" : xs)) (TParam (TSymbol "->" : ys)) = do
+unify (TParam xs) (TParam ys) = do
   forM_ (zip xs ys) (\(x, y) -> unify x y)
 
-unify x y | x == y    = return ()
+unify x y | x == y = return ()
 
+unify (TSymbol n) t | isTypeVar n && not (n `elem` freeVars t) = constrain n t
+unify t (TSymbol n) | isTypeVar n && not (n `elem` freeVars t) = constrain n t
 
-unify x y = throwE $ "Types don't match: " ++ show x ++ " <-> " ++ show y
+unify x y = throwE $ "Can't unify types: " ++ show x ++ " <-> " ++ show y
 
 exampleEnv = Map.fromList
   [ ("n", tInt)
@@ -134,6 +185,8 @@ exampleEnv = Map.fromList
   , ("id", TForall "a" $ tFunc [TSymbol "a", TSymbol "a"])
   , ("unwords", tFunc [ tList tString, tString ])
   , ("show", TForall "a" $ tFunc [TSymbol "a", tString])
+  , ("ff", TForall "a" $ tFunc [TSymbol "a", TSymbol "a", TSymbol "a"])
+  , ("magic", TForall "a" $ TSymbol "a")
   ]
 
 exampleExprs :: [SExpr]
@@ -142,18 +195,30 @@ exampleExprs =
   , S.SAtom $ S.AString "hello"
   , S.SAtom $ S.ASymbol "unknown"
   , S.SAtom $ S.ASymbol "n"
+  , S.SAtom $ S.ASymbol "m"
   , S.SAtom $ S.ASymbol "true"
   , S.SAtom $ S.ASymbol "s"
+  , S.SAtom $ S.ASymbol "ss"
   , S.SAtom $ S.ASymbol "f"
+  , S.SAtom $ S.ASymbol "id"
+  , S.SAtom $ S.ASymbol "magic"
   , S.SList [ S.SAtom $ S.ASymbol "g", S.SAtom $ S.ASymbol "h" ]
   , S.SList [ S.SAtom $ S.ASymbol "n", S.SAtom $ S.ASymbol "m" ]
   , S.SList [ S.SAtom $ S.ASymbol "f", S.SAtom $ S.ASymbol "n" ]
   , S.SList [ S.SAtom $ S.ASymbol "f", S.SAtom $ S.ASymbol "n", S.SAtom $ S.ASymbol "true" ]
   , S.SList [ S.SAtom $ S.ASymbol "f", S.SAtom $ S.ASymbol "n", S.SAtom $ S.ASymbol "m" ]
   , S.SList [ S.SAtom $ S.ASymbol "id", S.SAtom $ S.ASymbol "n" ]
+  , S.SList [ S.SAtom $ S.ASymbol "id", S.SAtom $ S.ASymbol "f" ]
+  , S.SList [ S.SAtom $ S.ASymbol "id", S.SAtom $ S.ASymbol "id" ]
+  , S.SList [ S.SAtom $ S.ASymbol "id", S.SAtom $ S.ASymbol "magic" ]
+  , S.SList [ S.SAtom $ S.ASymbol "ff", S.SAtom $ S.AInt 23, S.SAtom $ S.AInt 42]
+  , S.SList [ S.SAtom $ S.ASymbol "ff", S.SAtom $ S.AInt 23, S.SAtom $ S.AString "hello" ]
+  , S.SList [ S.SAtom $ S.ASymbol "ff", S.SAtom $ S.AInt 23, S.SAtom $ S.ASymbol "magic" ]
   ]
 
 exampleTypes = map (typeOf exampleEnv) exampleExprs
 
-example = putStrLn $ unlines $ map show $ zip exampleExprs exampleTypes
+example = putStrLn $ unlines $ map print $ zip exampleExprs exampleTypes
+  where print (_, Left err) = err
+        print (expr, Right typ) = show expr ++ " :: " ++ show typ
 
