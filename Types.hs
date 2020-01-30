@@ -187,6 +187,8 @@ exampleEnv = Map.fromList
   , ("show", TForall "a" $ tFunc [TSymbol "a", tString])
   , ("ff", TForall "a" $ tFunc [TSymbol "a", TSymbol "a", TSymbol "a"])
   , ("magic", TForall "a" $ TSymbol "a")
+  , ("fx", TForall "a" $ tFunc [TSymbol "a", TSymbol "Int"])
+  , ("fy", TForall "a" $ tFunc [TSymbol "Int", TSymbol "a"])
   ]
 
 exampleExprs :: [SExpr]
@@ -200,6 +202,9 @@ exampleExprs =
   , S.SAtom $ S.ASymbol "s"
   , S.SAtom $ S.ASymbol "ss"
   , S.SAtom $ S.ASymbol "f"
+  , S.SAtom $ S.ASymbol "ff"
+  , S.SAtom $ S.ASymbol "fx"
+  , S.SAtom $ S.ASymbol "fy"
   , S.SAtom $ S.ASymbol "id"
   , S.SAtom $ S.ASymbol "magic"
   , S.SList [ S.SAtom $ S.ASymbol "g", S.SAtom $ S.ASymbol "h" ]
@@ -214,6 +219,11 @@ exampleExprs =
   , S.SList [ S.SAtom $ S.ASymbol "ff", S.SAtom $ S.AInt 23, S.SAtom $ S.AInt 42]
   , S.SList [ S.SAtom $ S.ASymbol "ff", S.SAtom $ S.AInt 23, S.SAtom $ S.AString "hello" ]
   , S.SList [ S.SAtom $ S.ASymbol "ff", S.SAtom $ S.AInt 23, S.SAtom $ S.ASymbol "magic" ]
+  , S.SList [ S.SAtom $ S.ASymbol "ff", S.SAtom $ S.ASymbol "id", S.SAtom $ S.ASymbol "id" ]
+  , S.SList [ S.SAtom $ S.ASymbol "ff", S.SAtom $ S.ASymbol "id", S.SAtom $ S.ASymbol "magic" ]
+  , S.SList [ S.SAtom $ S.ASymbol "ff", S.SAtom $ S.ASymbol "magic", S.SAtom $ S.ASymbol "id" ]
+  , S.SList [ S.SAtom $ S.ASymbol "ff", S.SAtom $ S.ASymbol "fx", S.SAtom $ S.ASymbol "fy" ]
+  , S.SList [ S.SAtom $ S.ASymbol "fun", S.SList [S.SAtom $ S.ASymbol "x"], S.SAtom $ S.ASymbol "x"]
   ]
 
 exampleTypes = map (typeOf exampleEnv) exampleExprs
