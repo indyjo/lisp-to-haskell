@@ -1,7 +1,7 @@
 module Types (Type, Env, Error, Infer, typeOf) where
 import Control.Monad (forM, forM_)
 import Control.Monad.Trans.Except (ExceptT, catchE, runExceptT, throwE)
-import Control.Monad.State.Lazy (State, get, put, modify, runState)
+import Control.Monad.State.Strict (State, get, put, modify, runState, withState)
 import Data.Either
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -109,6 +109,26 @@ typeofM (S.SAtom (S.ASymbol s)) = do
 -- Type of ()
 typeofM (S.SList []) = return $ TSymbol "()"
 
+-- Type of lambda expressions
+typeofM exp@(S.SList (S.SAtom (S.ASymbol "fun") : (S.SList args) : body : [])) = go
+  where
+    go = result `catchE` \err -> throwE $ "Error in lambda expression " ++ show exp ++ ": " ++ err
+    result = do
+      locals <- createLocals
+      -- create an environment in which formal arguments are bound
+      InferState { env = oldEnv } <- get
+      modify (\state -> state { env = Map.fromList locals `Map.union` oldEnv } )
+      resultType <- typeofM body
+      -- restore the original environment
+      modify (\state -> state { env = oldEnv })
+      return ( tFunc (map (\(_, t) -> t) locals ++ [resultType]) )
+    createLocals :: Infer [(String, Type)]
+    createLocals = forM args $ \arg -> case arg of
+      S.SAtom (S.ASymbol name) -> do
+        tvar <- newTypeVar
+        return (name, TSymbol tvar)
+      otherwise                -> throwE $ show arg ++ " found in list of formal arguments"
+
 -- type of a redundant pair of parentheses (e)
 typeofM (S.SList [e]) = typeofM e
 
@@ -152,17 +172,28 @@ typeOf env expr = result
   where
     (preresult, InferState { subst = substitutions }) = runState (runExceptT (typeofM expr)) $ InferState { env = env, count = 0, subst = initSubst }
     result = fmap (closeOver . applySubstitutions substitutions) preresult
-    applySubstitutions s t = Map.foldrWithKey (\name subst accum -> replaceVar name subst accum) t s
 
+
+-- Given the map of substitutions, apply it to the given type and return a new type.
+applySubstitutions :: Subst -> Type -> Type
+applySubstitutions s t = Map.foldrWithKey (\name subst accum -> replaceVar name subst accum) t s
+
+-- Constrain a type variable to a type
 constrain :: String -> Type -> Infer ()
 constrain n t = do
   InferState { subst = s } <- get
   case Map.lookup n s of
     Nothing -> do
-      modify (\s -> s { subst = Map.insert n t (subst s) })
+      modify (\state -> state { subst = Map.insert n t s })
     Just t' -> do
+      -- There is already a substitution t' that possibly conflicts with t. So try to unify.
       unify t t'
+      -- If that worked, replace t' with the unifier of t and t', which is t''.
+      InferState { subst = s } <- get
+      let t'' = applySubstitutions s t
+      modify (\state -> state { subst = Map.insert n t'' s })
 
+-- Unify takes two types and either finds a unifier by applying substitutions, or throws an error.
 unify :: Type -> Type -> Infer ()
 unify (TParam xs) (TParam ys) = do
   forM_ (zip xs ys) (\(x, y) -> unify x y)
@@ -224,6 +255,9 @@ exampleExprs =
   , S.SList [ S.SAtom $ S.ASymbol "ff", S.SAtom $ S.ASymbol "magic", S.SAtom $ S.ASymbol "id" ]
   , S.SList [ S.SAtom $ S.ASymbol "ff", S.SAtom $ S.ASymbol "fx", S.SAtom $ S.ASymbol "fy" ]
   , S.SList [ S.SAtom $ S.ASymbol "fun", S.SList [S.SAtom $ S.ASymbol "x"], S.SAtom $ S.ASymbol "x"]
+  , S.SList [ S.SAtom $ S.ASymbol "fun", S.SList [S.SAtom $ S.ASymbol "x"], S.SAtom $ S.ASymbol "n"]
+  , S.SList [ S.SAtom $ S.ASymbol "fun", S.SList [S.SAtom $ S.ASymbol "x"], S.SList [ S.SAtom $ S.ASymbol "fx", S.SAtom $ S.ASymbol "x"]]
+  , S.SList [ S.SAtom $ S.ASymbol "fun", S.SList [S.SAtom $ S.ASymbol "x"], S.SList [ S.SAtom $ S.ASymbol "fy", S.SAtom $ S.ASymbol "x"]]
   ]
 
 exampleTypes = map (typeOf exampleEnv) exampleExprs
