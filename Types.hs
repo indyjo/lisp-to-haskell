@@ -165,7 +165,7 @@ typeofM exp@(S.SList (func:params)) = go
     verify b e = if b then return () else (throwE e)
 
     getFuncTypeParams :: Type -> Infer [Type]
-    getFuncTypeParams t = 
+    getFuncTypeParams t =
       case t of
         TParam (arrow : funcTypeParams) -> return funcTypeParams
         otherwise -> throwE $ "Not a function. Its type is: " ++ show t
@@ -188,20 +188,16 @@ typeOf env expr = runExcept $ do
 applySubstitutions :: Subst -> Type -> Type
 applySubstitutions s t = Map.foldrWithKey (\name subst accum -> replaceVar name subst accum) t s
 
--- Constrain a type variable to a type
+-- Constrain a type variable to a type t
 constrain :: String -> Type -> Infer ()
 constrain n t = do
   InferState { subst = s } <- get
-  case Map.lookup n s of
-    Nothing -> do
-      modify (\state -> state { subst = Map.insert n t s })
-    Just t' -> do
-      -- There is already a substitution t' that possibly conflicts with t. So try to unify.
-      unify t t'
-      -- If that worked, replace t' with the unifier of t and t', which is t''.
-      InferState { subst = s } <- get
-      let t'' = applySubstitutions s t
-      modify (\state -> state { subst = Map.insert n t'' s })
+  -- Unify with any previous constraint (i.e., constrain further)
+  forM_ (Map.lookup n s) $ unify t
+  -- If that worked, replace t with the unifier
+  InferState { subst = s } <- get
+  let t' = applySubstitutions s t
+  modify (\state -> state { subst = Map.insert n t' s })
 
 -- Unify takes two types and either finds a unifier by applying substitutions, or throws an error.
 unify :: Type -> Type -> Infer ()
@@ -281,10 +277,14 @@ exampleExprs =
   , eLst [ eSym "fun", eLst [eSym "x"], eSym "n"]
   , eLst [ eSym "fun", eLst [eSym "x"], eLst [ eSym "fx", eSym "x"]]
   , eLst [ eSym "fun", eLst [eSym "x"], eLst [ eSym "fy", eSym "x"]]
+  , eLst [ eSym "fun", eLst [eSym "f"], eLst [ eSym "f", eSym "f" ]]
   , eLst [ eSym "do", eLst [eSym "_", eLst [eSym "compute", eInt 42]]]
   , eLst [ eSym "do",
            eLst [eSym "n", eLst [eSym "compute", eInt 42]],
            eLst [eSym "_", eLst [eSym "compute", eLst [eSym "f", eSym "n", eInt 23]]]]
+  , eLst [ eSym "do",
+           eLst [eSym "f", eLst [eSym "compute", eStr "id"]],
+           eLst [eSym "_", eLst [eSym "compute", eLst [eSym "f", eSym "f"]]]]
   ]
 
 exampleTypes = map (typeOf exampleEnv) exampleExprs
