@@ -145,12 +145,12 @@ typeofM exp@(S.SList (func:params)) = go
     result = do
       -- Get the type of the function
       funcType <- typeofM func
+      -- Get the types of the actual arguments
+      actualParamTypes <- forM params typeofM
       -- The function should be of type (-> T1 ... TN R).
       -- Extract those type parameters, i.e. the expected types of the function's arguments
       -- and the function's return type
-      funcTypeParams <- getFuncTypeParams funcType
-      -- Get the types of the actual arguments
-      actualParamTypes <- forM params typeofM
+      funcTypeParams <- getFuncTypeParams funcType actualParamTypes
       -- Check that formal and actual arguments have same size
       let nExp = (length funcTypeParams) - 1
           nAct = length actualParamTypes
@@ -164,11 +164,16 @@ typeofM exp@(S.SList (func:params)) = go
     verify :: Bool -> Error -> Infer ()
     verify b e = if b then return () else (throwE e)
 
-    getFuncTypeParams :: Type -> Infer [Type]
-    getFuncTypeParams t =
+    getFuncTypeParams :: Type -> [Type] -> Infer [Type]
+    getFuncTypeParams t ts =
       case t of
         TParam (arrow : funcTypeParams) -> return funcTypeParams
-        otherwise -> throwE $ "Not a function. Its type is: " ++ show t
+        TSymbol n | isTypeVar n         -> do
+          retTypeVar <- newTypeVar
+          let coerced = tFunc (ts ++ [TSymbol retTypeVar])
+          unify t coerced
+          forM (ts ++ [TSymbol retTypeVar]) applySubstitutionsM
+        otherwise                       -> throwE $ "Not a function. Its type is: " ++ show t
 
 -- non-monadic wrapper around typeofM0
 typeOf :: Env -> SExpr -> Either Error Type
@@ -187,6 +192,11 @@ typeOf env expr = runExcept $ do
 -- Given the map of substitutions, apply it to the given type and return a new type.
 applySubstitutions :: Subst -> Type -> Type
 applySubstitutions s t = Map.foldrWithKey (\name subst accum -> replaceVar name subst accum) t s
+
+applySubstitutionsM :: Type -> Infer Type
+applySubstitutionsM t = do
+  InferState { subst = s } <- get
+  return $ applySubstitutions s t
 
 -- Constrain a type variable to a type t
 constrain :: String -> Type -> Infer ()
@@ -277,7 +287,9 @@ exampleExprs =
   , eLst [ eSym "fun", eLst [eSym "x"], eSym "n"]
   , eLst [ eSym "fun", eLst [eSym "x"], eLst [ eSym "fx", eSym "x"]]
   , eLst [ eSym "fun", eLst [eSym "x"], eLst [ eSym "fy", eSym "x"]]
+  , eLst [ eSym "fun", eLst [eSym "f"], eLst [ eSym "f", eSym "n" ]]
   , eLst [ eSym "fun", eLst [eSym "f"], eLst [ eSym "f", eSym "f" ]]
+  , eLst [ eSym "fun", eLst [eSym "f", eSym "g"], eLst [eSym "fun", eLst [eSym "x"],  eLst [ eSym "f", eLst [eSym "g", eSym "x" ]]]]
   , eLst [ eSym "do", eLst [eSym "_", eLst [eSym "compute", eInt 42]]]
   , eLst [ eSym "do",
            eLst [eSym "n", eLst [eSym "compute", eInt 42]],
