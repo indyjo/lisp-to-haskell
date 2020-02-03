@@ -1,10 +1,11 @@
 module Types (Type, Env, Error, Infer, typeOf) where
 import Control.Monad (forM, forM_)
-import Control.Monad.Trans.Except (ExceptT, catchE, runExceptT, throwE)
+import Control.Monad.Trans.Except (ExceptT, catchE, except, runExcept, runExceptT, throwE)
 import Control.Monad.State.Strict (State, get, put, modify, runState, withState)
 import Data.Either
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Desugar (desugar)
 import SExpr (SExpr)
 import qualified SExpr as S
 
@@ -22,6 +23,9 @@ instance Show Type where
 -- arrow is the parametric type of functions
 arrow = TSymbol "->"
 tFunc ts = TParam $ arrow : ts
+
+action = TSymbol "Action"
+tAction t = TParam $ [action, t]
 
 tBool = TSymbol "Bool"
 tInt = TSymbol "Int"
@@ -166,13 +170,19 @@ typeofM exp@(S.SList (func:params)) = go
         TParam (arrow : funcTypeParams) -> return funcTypeParams
         otherwise -> throwE $ "Not a function. Its type is: " ++ show t
 
--- non-monadic wrapper around typeofM
+-- non-monadic wrapper around typeofM0
 typeOf :: Env -> SExpr -> Either Error Type
-typeOf env expr = result
-  where
-    (preresult, InferState { subst = substitutions }) = runState (runExceptT (typeofM expr)) $ InferState { env = env, count = 0, subst = initSubst }
-    result = fmap (closeOver . applySubstitutions substitutions) preresult
-
+typeOf env expr = runExcept $ do
+  desugared <- desugar expr
+  -- run type checker on desugared version of expression
+  let initState = InferState { env = env, count = 0, subst = initSubst }
+      typecheck = typeofM desugared
+      r :: Either Error Type
+      (r, InferState { subst = substitutions }) = runState (runExceptT typecheck) initState
+  -- check for error and unwrap r (it's an Either Error Type)
+  r <- except r
+  -- apply type substitutions and add "forall" for every free variable.
+  return $ closeOver $ applySubstitutions substitutions $ r
 
 -- Given the map of substitutions, apply it to the given type and return a new type.
 applySubstitutions :: Subst -> Type -> Type
@@ -220,44 +230,61 @@ exampleEnv = Map.fromList
   , ("magic", TForall "a" $ TSymbol "a")
   , ("fx", TForall "a" $ tFunc [TSymbol "a", TSymbol "Int"])
   , ("fy", TForall "a" $ tFunc [TSymbol "Int", TSymbol "a"])
+  , ("compute", TForall "a" $ tFunc[TSymbol "a", tAction $ TSymbol "a"])
+  , (">>=", TForall "m" $ TForall "a" $ TForall "b" $
+            tFunc [
+              TParam [TSymbol "m", TSymbol "a"],
+              tFunc [TSymbol "a", TParam [TSymbol "m", TSymbol "b"]],
+              TParam [TSymbol "m", TSymbol "b"]])
   ]
+
+eSym s = S.SAtom (S.ASymbol s)
+eInt n = S.SAtom (S.AInt n)
+eStr s = S.SAtom (S.AString s)
+eLst l = S.SList l
 
 exampleExprs :: [SExpr]
 exampleExprs =
-  [ S.SAtom $ S.AInt 42
-  , S.SAtom $ S.AString "hello"
-  , S.SAtom $ S.ASymbol "unknown"
-  , S.SAtom $ S.ASymbol "n"
-  , S.SAtom $ S.ASymbol "m"
-  , S.SAtom $ S.ASymbol "true"
-  , S.SAtom $ S.ASymbol "s"
-  , S.SAtom $ S.ASymbol "ss"
-  , S.SAtom $ S.ASymbol "f"
-  , S.SAtom $ S.ASymbol "ff"
-  , S.SAtom $ S.ASymbol "fx"
-  , S.SAtom $ S.ASymbol "fy"
-  , S.SAtom $ S.ASymbol "id"
-  , S.SAtom $ S.ASymbol "magic"
-  , S.SList [ S.SAtom $ S.ASymbol "g", S.SAtom $ S.ASymbol "h" ]
-  , S.SList [ S.SAtom $ S.ASymbol "n", S.SAtom $ S.ASymbol "m" ]
-  , S.SList [ S.SAtom $ S.ASymbol "f", S.SAtom $ S.ASymbol "n" ]
-  , S.SList [ S.SAtom $ S.ASymbol "f", S.SAtom $ S.ASymbol "n", S.SAtom $ S.ASymbol "true" ]
-  , S.SList [ S.SAtom $ S.ASymbol "f", S.SAtom $ S.ASymbol "n", S.SAtom $ S.ASymbol "m" ]
-  , S.SList [ S.SAtom $ S.ASymbol "id", S.SAtom $ S.ASymbol "n" ]
-  , S.SList [ S.SAtom $ S.ASymbol "id", S.SAtom $ S.ASymbol "f" ]
-  , S.SList [ S.SAtom $ S.ASymbol "id", S.SAtom $ S.ASymbol "id" ]
-  , S.SList [ S.SAtom $ S.ASymbol "id", S.SAtom $ S.ASymbol "magic" ]
-  , S.SList [ S.SAtom $ S.ASymbol "ff", S.SAtom $ S.AInt 23, S.SAtom $ S.AInt 42]
-  , S.SList [ S.SAtom $ S.ASymbol "ff", S.SAtom $ S.AInt 23, S.SAtom $ S.AString "hello" ]
-  , S.SList [ S.SAtom $ S.ASymbol "ff", S.SAtom $ S.AInt 23, S.SAtom $ S.ASymbol "magic" ]
-  , S.SList [ S.SAtom $ S.ASymbol "ff", S.SAtom $ S.ASymbol "id", S.SAtom $ S.ASymbol "id" ]
-  , S.SList [ S.SAtom $ S.ASymbol "ff", S.SAtom $ S.ASymbol "id", S.SAtom $ S.ASymbol "magic" ]
-  , S.SList [ S.SAtom $ S.ASymbol "ff", S.SAtom $ S.ASymbol "magic", S.SAtom $ S.ASymbol "id" ]
-  , S.SList [ S.SAtom $ S.ASymbol "ff", S.SAtom $ S.ASymbol "fx", S.SAtom $ S.ASymbol "fy" ]
-  , S.SList [ S.SAtom $ S.ASymbol "fun", S.SList [S.SAtom $ S.ASymbol "x"], S.SAtom $ S.ASymbol "x"]
-  , S.SList [ S.SAtom $ S.ASymbol "fun", S.SList [S.SAtom $ S.ASymbol "x"], S.SAtom $ S.ASymbol "n"]
-  , S.SList [ S.SAtom $ S.ASymbol "fun", S.SList [S.SAtom $ S.ASymbol "x"], S.SList [ S.SAtom $ S.ASymbol "fx", S.SAtom $ S.ASymbol "x"]]
-  , S.SList [ S.SAtom $ S.ASymbol "fun", S.SList [S.SAtom $ S.ASymbol "x"], S.SList [ S.SAtom $ S.ASymbol "fy", S.SAtom $ S.ASymbol "x"]]
+  [ eInt 42
+  , eStr "hello"
+  , eSym "unknown"
+  , eSym "n"
+  , eSym "m"
+  , eSym "true"
+  , eSym "s"
+  , eSym "ss"
+  , eSym "f"
+  , eSym "ff"
+  , eSym "fx"
+  , eSym "fy"
+  , eSym "id"
+  , eSym "magic"
+  , eSym "compute"
+  , eSym ">>="
+  , eLst [ eSym "g", eSym "h" ]
+  , eLst [ eSym "n", eSym "m" ]
+  , eLst [ eSym "f", eSym "n" ]
+  , eLst [ eSym "f", eSym "n", eSym "true" ]
+  , eLst [ eSym "f", eSym "n", eSym "m" ]
+  , eLst [ eSym "id", eSym "n" ]
+  , eLst [ eSym "id", eSym "f" ]
+  , eLst [ eSym "id", eSym "id" ]
+  , eLst [ eSym "id", eSym "magic" ]
+  , eLst [ eSym "ff", eInt 23, eInt 42]
+  , eLst [ eSym "ff", eInt 23, eStr "hello" ]
+  , eLst [ eSym "ff", eInt 23, eSym "magic" ]
+  , eLst [ eSym "ff", eSym "id", eSym "id" ]
+  , eLst [ eSym "ff", eSym "id", eSym "magic" ]
+  , eLst [ eSym "ff", eSym "magic", eSym "id" ]
+  , eLst [ eSym "ff", eSym "fx", eSym "fy" ]
+  , eLst [ eSym "fun", eLst [eSym "x"], eSym "x"]
+  , eLst [ eSym "fun", eLst [eSym "x"], eSym "n"]
+  , eLst [ eSym "fun", eLst [eSym "x"], eLst [ eSym "fx", eSym "x"]]
+  , eLst [ eSym "fun", eLst [eSym "x"], eLst [ eSym "fy", eSym "x"]]
+  , eLst [ eSym "do", eLst [eSym "_", eLst [eSym "compute", eInt 42]]]
+  , eLst [ eSym "do",
+           eLst [eSym "n", eLst [eSym "compute", eInt 42]],
+           eLst [eSym "_", eLst [eSym "compute", eLst [eSym "f", eSym "n", eInt 23]]]]
   ]
 
 exampleTypes = map (typeOf exampleEnv) exampleExprs
@@ -266,3 +293,4 @@ example = putStrLn $ unlines $ map print $ zip exampleExprs exampleTypes
   where print (_, Left err) = err
         print (expr, Right typ) = show expr ++ " :: " ++ show typ
 
+desugarExample = putStrLn $ unlines $ map (show . runExcept . desugar) exampleExprs
