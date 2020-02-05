@@ -1,4 +1,4 @@
-module Types (Type, Env, Error, Infer, typeOf) where
+module Types (Type, Env, Error, Infer, initEnv, typeOf) where
 import Control.Monad (forM, forM_)
 import Control.Monad.Trans.Except (ExceptT, catchE, except, runExcept, runExceptT, throwE)
 import Control.Monad.State.Strict (State, get, put, modify, runState, withState)
@@ -34,6 +34,8 @@ tChar = TSymbol "Char"
 tDouble = TSymbol "Double"
 tList t = TParam $ TSymbol "List" : [ t ]
 tString = tList tChar
+tUnit = TSymbol "()"
+tRef t = TParam [ TSymbol "Ref", t ]
 
 -- type variable must begin with lower-case letters
 isTypeVar :: String -> Bool
@@ -54,11 +56,44 @@ closeOver t = case freeVars t of
   otherwise -> t
 
 type Env = Map String Type
-type Subst = Map String Type
-type Error = String
+initEnv :: Env
+initEnv = Map.fromList
+  [ ("True", tBool)
+  , ("False", tBool)
+  , ("id", TForall "a" $ tFunc [TSymbol "a", TSymbol "a"])
+  , ("show", TForall "a" $ tFunc [TSymbol "a", tString])
+  , ("compute", TForall "a" $ tFunc[TSymbol "a", tAction $ TSymbol "a"])
+  , (">>=", TForall "m" $ TForall "a" $ TForall "b" $
+            tFunc [
+              TParam [TSymbol "m", TSymbol "a"],
+              tFunc [TSymbol "a", TParam [TSymbol "m", TSymbol "b"]],
+              TParam [TSymbol "m", TSymbol "b"]])
+  , ("pair", TForall "a" $ TForall "b" $ tFunc [ TSymbol "a", TSymbol "b"
+                                               , TParam [TSymbol "Pair", TSymbol "a", TSymbol "b"]])
+  , ("==", TForall "a" $ tFunc [ TSymbol "a", TSymbol "a", TSymbol "Bool" ] )
+  , ("<", TForall "a" $ tFunc [ TSymbol "a", TSymbol "a", TSymbol "Bool" ] )
+  , (">", TForall "a" $ tFunc [ TSymbol "a", TSymbol "a", TSymbol "Bool" ] )
+  , ("<=", TForall "a" $ tFunc [ TSymbol "a", TSymbol "a", TSymbol "Bool" ] )
+  , (">=", TForall "a" $ tFunc [ TSymbol "a", TSymbol "a", TSymbol "Bool" ] )
+  , ("if", TForall "a" $ tFunc [ TSymbol "Bool", TSymbol "a", TSymbol "a", TSymbol "a" ])
+  , ("+", TForall "a" $ tFunc [ TSymbol "a", TSymbol "a", TSymbol "a" ])
+  , ("*", TForall "a" $ tFunc [ TSymbol "a", TSymbol "a", TSymbol "a" ])
+  , ("<>", TForall "a" $ tFunc [ TSymbol "a", TSymbol "a", TSymbol "a" ])
+  , ("cons", TForall "a" $ tFunc [ TSymbol "a", TParam[ TSymbol "List", TSymbol "a" ], TParam[ TSymbol "List", TSymbol "a" ]])
+  , ("while", TForall "a" $ tFunc [ tAction tBool, tAction (TSymbol "a"), tAction tUnit ])
+  , ("log", tFunc [ tString, tAction tUnit ])
+  , ("alloc", TForall "a" $ tFunc [ TSymbol "a", tRef (TSymbol "a") ])
+  , ("get", TForall "a" $ tFunc [ tRef (TSymbol "a"), TSymbol "a" ])
+  , ("update", TForall "a" $ tFunc [ tRef (TSymbol "a"), tFunc [ TSymbol "a", TSymbol "a" ], tAction tUnit])
+  , ("getLine", tAction tString)
+  ]
 
+
+type Subst = Map String Type
 initSubst :: Subst
 initSubst = Map.empty
+
+type Error = String
 
 data InferState = InferState { env :: Env, count :: Int, subst :: Subst }
 
@@ -77,10 +112,15 @@ setEnv newEnv = do
 
 lookupEnv :: String -> Infer Type
 lookupEnv s = do
-  env <- getEnv
-  case Map.lookup s env of
+  res <- maybeLookupEnv s
+  case res of
     Just t  -> return t
     Nothing -> throwE $ "No type known for symbol " ++ s
+
+maybeLookupEnv :: String -> Infer (Maybe Type)
+maybeLookupEnv s = do
+  e <- getEnv
+  return (Map.lookup s e)
 
 insertEnv :: String -> Type -> Infer ()
 insertEnv n t = modify $ \state -> state { env = Map.insert n t (env state) }
@@ -129,15 +169,15 @@ typeofM (S.SList []) = return $ TSymbol "()"
 -- Type of lambda expressions (fun (name1 ... nameN) body)
 typeofM exp@(S.SList (S.SAtom (S.ASymbol "fun") : (S.SList args) : body : [])) = go
   where
-    go = result `catchE` \err -> throwE $ "Error in lambda expression " ++ show exp ++ ": " ++ err
+    go = result `catchE` \err -> throwE $ "Error in lambda expression " ++ show exp ++ ":\n" ++ err
     result = do
       locals <- createLocals
       -- create an environment in which formal arguments are bound
-      InferState { env = oldEnv } <- get
+      oldEnv <- getEnv
       modify (\state -> state { env = Map.fromList locals `Map.union` oldEnv } )
       resultType <- typeofM body
       -- restore the original environment
-      modify (\state -> state { env = oldEnv })
+      setEnv oldEnv
       return ( tFunc (map (\(_, t) -> t) locals ++ [resultType]) )
     createLocals :: Infer [(String, Type)]
     createLocals = forM args $ \arg -> case arg of
@@ -149,7 +189,7 @@ typeofM exp@(S.SList (S.SAtom (S.ASymbol "fun") : (S.SList args) : body : [])) =
 -- Type of let expressions (let (name expr) body)
 typeofM letexpr@(S.SList [S.SAtom (S.ASymbol "let"), S.SList bindingsExprs,  body]) = go
   where
-    go = result `catchE` \err -> throwE $ "Error in let expression " ++ show letexpr ++ ": " ++ err
+    go = result `catchE` \err -> throwE $ "Error in let expression " ++ show letexpr ++ ":\n" ++ err
     result = do
       valueBindings <- transformBindings bindingsExprs
       -- create an environment in which each name is bound to a new type variable
@@ -179,7 +219,7 @@ typeofM letexpr@(S.SList [S.SAtom (S.ASymbol "let"), S.SList bindingsExprs,  bod
         go (S.SList [S.SAtom (S.ASymbol name), expr] : rest) = do
           remainingBindings <- transformBindings rest
           return ((name, expr) : remainingBindings)
-        go xs = throwE $ "Invalid binding pattern"
+        go (x:_) = throwE $ "Invalid binding pattern " ++ show x
 
 typeofM badlet@(S.SList (S.SAtom (S.ASymbol "let") : _)) = throwE $ "Bad let expression: " ++ show badlet
 
@@ -189,7 +229,7 @@ typeofM (S.SList [e]) = typeofM e
 -- Type of function application (f x) or (f x y) ...
 typeofM exp@(S.SList (func:params)) = go
   where
-    go = result `catchE` \err -> throwE $ "Error in " ++ show exp ++ ": " ++ err
+    go = result `catchE` \err -> throwE $ "Error in function application " ++ show exp ++ ":\n" ++ err
     
     result :: Infer Type
     result = do
@@ -207,7 +247,12 @@ typeofM exp@(S.SList (func:params)) = go
         in verify (nExp == nAct)
                   ("Function expects " ++ show nExp ++ " arguments, but " ++ show nAct ++ " given.")
       -- Match formal and actual argument types
-      forM_ (zip funcTypeParams actualParamTypes) (\(a,b) -> unify a b)
+      forM_ (zip funcTypeParams (zip actualParamTypes params)) (\(a,(b,bExpr)) ->
+        unify a b `catchE` \e ->
+          throwE $ "Error unifying" ++
+                   "\n formal argument type " ++ show a ++
+                   "\n with actual type     " ++ show b ++
+                   "\n of expression        " ++ show bExpr ++ ":\n" ++ e)
       -- Result type is determined by the function's last function type parameter
       return $ last funcTypeParams
     
@@ -221,7 +266,7 @@ typeofM exp@(S.SList (func:params)) = go
         TSymbol n | isTypeVar n         -> do
           retTypeVar <- newTypeVar
           let coerced = tFunc (ts ++ [TSymbol retTypeVar])
-          unify t coerced
+          unify t coerced `catchE` \e -> throwE $ "Error trying to infer type of function " ++ show func ++ ":\n" ++ e
           forM (ts ++ [TSymbol retTypeVar]) applySubstitutionsM
         otherwise                       -> throwE $ "Not a function. Its type is: " ++ show t
 
@@ -251,13 +296,12 @@ applySubstitutionsM t = do
 -- Constrain a type variable to a type t
 constrain :: String -> Type -> Infer ()
 constrain n t = do
-  InferState { subst = s } <- get
   -- Unify with any previous constraint (i.e., constrain further)
-  forM_ (Map.lookup n s) $ unify t
+  previous <- maybeLookupEnv n
+  forM_ previous $ unify t
   -- If that worked, replace t with the unifier
-  InferState { subst = s } <- get
-  let t' = applySubstitutions s t
-  modify (\state -> state { subst = Map.insert n t' s })
+  t' <- applySubstitutionsM t
+  insertEnv n t'
 
 -- Unify takes two types and either finds a unifier by applying substitutions, or throws an error.
 unify :: Type -> Type -> Infer ()
@@ -350,7 +394,7 @@ exampleExprStrs =
   , "(let ((x n)) x)"
   , "(let ((x magic)) x)"
   , "(let ((f id)) (pair (f 42) (f true)))"
-  , "((fun (f)   (pair (f 42) (f true))) id)"
+  , "((fun (f)     (pair (f 42) (f true))) id)"
   , "(let ((xs (cons 0 xs))) xs)"
   , "(let ((inf (+ inf 1))) inf)"
   , "(let ((fac (fun (n) (if (== n 0) 1 (* n (fac (+ n -1))))))) fac)"

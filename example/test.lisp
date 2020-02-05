@@ -8,5 +8,5 @@
 			(_	(log "Your name: "))
 			(name	getLine)
 			(_	(log (<> "Hello, " name)))
-			(_	(update n (+ 1))))))
+			(_	(update n (fun (x) (+ x 1)))))))
 )

@@ -1,4 +1,5 @@
 module Desugar (desugar) where
+import Control.Monad (mapM)
 import Control.Monad.Trans.Except
 import SExpr
 
@@ -16,15 +17,20 @@ desugar expr@(SList (SAtom (ASymbol "do") : stmts)) = do
     -- (>>= ...) operations.
     go :: [SExpr] -> Desugar SExpr
     -- Last statement (n expr) -> expr
-    go (SList (SAtom (ASymbol _) : expr : []) : []) = return expr
+    go (SList (SAtom (ASymbol _) : expr : []) : []) = desugar expr
     -- Any statement  (n expr) -> xform to (>>= expr (fun (n) ...))
     go (SList (SAtom (ASymbol n) : expr : []) : ss) = do
+      desugared <- desugar expr
       next <- go ss
       return $ SList [
         SAtom (ASymbol ">>="),
-        expr,
+        desugared,
         SList [SAtom (ASymbol "fun"), SList [SAtom $ ASymbol n], next]]
     go bad = throwE $ "Invalid statement " ++ show bad
+
+desugar (SList es) = do
+  ds <- mapM desugar es
+  return (SList ds)
 
 desugar expr = return expr
 
