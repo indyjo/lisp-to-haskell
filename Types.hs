@@ -66,12 +66,24 @@ data InferState = InferState { env :: Env, count :: Int, subst :: Subst }
 -- Supports exceptions and passing the environment as state.
 type Infer = ExceptT Error (State InferState)
 
+getEnv :: Infer (Map String Type)
+getEnv = do
+  InferState { env = result } <- get
+  return result
+
+setEnv :: (Map String Type) -> Infer ()
+setEnv newEnv = do
+  modify $ \state -> state { env = newEnv }
+
 lookupEnv :: String -> Infer Type
 lookupEnv s = do
-  InferState { env = env } <- get
+  env <- getEnv
   case Map.lookup s env of
     Just t  -> return t
     Nothing -> throwE $ "No type known for symbol " ++ s
+
+insertEnv :: String -> Type -> Infer ()
+insertEnv n t = modify $ \state -> state { env = Map.insert n t (env state) }
 
 newTypeVar :: Infer String
 newTypeVar = do
@@ -135,19 +147,40 @@ typeofM exp@(S.SList (S.SAtom (S.ASymbol "fun") : (S.SList args) : body : [])) =
       otherwise                -> throwE $ show arg ++ " found in list of formal arguments"
 
 -- Type of let expressions (let (name expr) body)
-typeofM letexpr@(S.SList [S.SAtom (S.ASymbol "let"), S.SList [S.SAtom (S.ASymbol name), expr],  body]) = go
+typeofM letexpr@(S.SList [S.SAtom (S.ASymbol "let"), S.SList bindingsExprs,  body]) = go
   where
     go = result `catchE` \err -> throwE $ "Error in let expression " ++ show letexpr ++ ": " ++ err
     result = do
-      exprType <- typeofM expr
-      exprType <- applySubstitutionsM exprType
-      -- create an environment in which name is bound to a forall-closed version of exprType
-      InferState { env = oldEnv } <- get
-      modify (\state -> state { env = Map.insert name (closeOver exprType) (env state) })
+      valueBindings <- transformBindings bindingsExprs
+      -- create an environment in which each name is bound to a new type variable
+      oldEnv <- getEnv
+      forM_ valueBindings $ \(name, _) -> do
+        tvar <- newTypeVar
+        insertEnv name (TSymbol tvar)
+      -- in the new environment, infer the types of all bound names and return a list of
+      -- (name, type) tuples.
+      typeBindings <- forM valueBindings $ \(name, expr) -> do
+        exprType <- typeofM expr
+        exprType <- applySubstitutionsM exprType
+        return (name, exprType)
+      -- now create an environment in which each name is bound to a forall-closed version of the
+      -- corresponding inferred type
+      setEnv oldEnv
+      forM_ typeBindings $ \(name, exprType) -> insertEnv name (closeOver exprType)
       bodyType <- typeofM body
       -- restore the original environment
-      modify (\state -> state { env = oldEnv })
+      setEnv oldEnv
       return bodyType
+    -- transforms an SExpr list (name1 expr1) ... (nameN exprN) into a list of pairs
+    transformBindings :: [SExpr] -> Infer [(String, SExpr)]
+    transformBindings bs = go bs `catchE` \err -> throwE ("Bad bindings list " ++ show (S.SList bs) ++ ": " ++ err)
+      where
+        go [] = return []
+        go (S.SList [S.SAtom (S.ASymbol name), expr] : rest) = do
+          remainingBindings <- transformBindings rest
+          return ((name, expr) : remainingBindings)
+        go xs = throwE $ "Invalid binding pattern"
+
 typeofM badlet@(S.SList (S.SAtom (S.ASymbol "let") : _)) = throwE $ "Bad let expression: " ++ show badlet
 
 -- type of a redundant pair of parentheses (e)
@@ -172,7 +205,7 @@ typeofM exp@(S.SList (func:params)) = go
       let nExp = (length funcTypeParams) - 1
           nAct = length actualParamTypes
         in verify (nExp == nAct)
-                  ("Function expects " ++ show nExp ++ " arguments, but only " ++ show nAct ++ " given.")
+                  ("Function expects " ++ show nExp ++ " arguments, but " ++ show nAct ++ " given.")
       -- Match formal and actual argument types
       forM_ (zip funcTypeParams actualParamTypes) (\(a,b) -> unify a b)
       -- Result type is determined by the function's last function type parameter
@@ -260,6 +293,11 @@ exampleEnv = Map.fromList
               TParam [TSymbol "m", TSymbol "b"]])
   , ("pair", TForall "a" $ TForall "b" $ tFunc [ TSymbol "a", TSymbol "b"
                                                , TParam [TSymbol "Pair", TSymbol "a", TSymbol "b"]])
+  , ("==", TForall "a" $ tFunc [ TSymbol "a", TSymbol "a", TSymbol "Bool" ])
+  , ("if", TForall "a" $ tFunc [ TSymbol "Bool", TSymbol "a", TSymbol "a", TSymbol "a" ])
+  , ("+", TForall "a" $ tFunc [ TSymbol "a", TSymbol "a", TSymbol "a" ])
+  , ("*", TForall "a" $ tFunc [ TSymbol "a", TSymbol "a", TSymbol "a" ])
+  , ("cons", TForall "a" $ tFunc [ TSymbol "a", TParam[ TSymbol "List", TSymbol "a" ], TParam[ TSymbol "List", TSymbol "a" ]])
   ]
 
 exampleExprStrs =
@@ -281,6 +319,8 @@ exampleExprStrs =
   , "compute"
   , ">>="
   , "pair"
+  , "=="
+  , "if"
   , "(g h)"
   , "(n m)"
   , "(f n)"
@@ -307,10 +347,14 @@ exampleExprStrs =
   , "(do (_ (compute 42)))"
   , "(do (n (compute 42)) (_ (compute (f n 23))))"
   , "(do (f (compute id)) (_ (compute (f f))))"
-  , "(let (x n) x)"
-  , "(let (x magic) x)"
-  , "(let (f id) (pair (f 42) (f true)))"
+  , "(let ((x n)) x)"
+  , "(let ((x magic)) x)"
+  , "(let ((f id)) (pair (f 42) (f true)))"
   , "((fun (f)   (pair (f 42) (f true))) id)"
+  , "(let ((xs (cons 0 xs))) xs)"
+  , "(let ((inf (+ inf 1))) inf)"
+  , "(let ((fac (fun (n) (if (== n 0) 1 (* n (fac (+ n -1))))))) fac)"
+  , "(let ( (a (+ b 1)) (b (+ a 1)) ) (pair a b))"
   ]
 
 parseExpr :: String -> SExpr
