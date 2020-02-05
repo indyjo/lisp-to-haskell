@@ -8,6 +8,7 @@ import qualified Data.Map.Strict as Map
 import Desugar (desugar)
 import SExpr (SExpr)
 import qualified SExpr as S
+import Text.ParserCombinators.ReadP (readP_to_S)
 
 data Type = TParam  [Type]        -- parametric type application (T1 ... TN), also for "->"
           | TForall String Type   -- forall <name> . <type>
@@ -113,7 +114,7 @@ typeofM (S.SAtom (S.ASymbol s)) = do
 -- Type of ()
 typeofM (S.SList []) = return $ TSymbol "()"
 
--- Type of lambda expressions
+-- Type of lambda expressions (fun (name1 ... nameN) body)
 typeofM exp@(S.SList (S.SAtom (S.ASymbol "fun") : (S.SList args) : body : [])) = go
   where
     go = result `catchE` \err -> throwE $ "Error in lambda expression " ++ show exp ++ ": " ++ err
@@ -132,6 +133,22 @@ typeofM exp@(S.SList (S.SAtom (S.ASymbol "fun") : (S.SList args) : body : [])) =
         tvar <- newTypeVar
         return (name, TSymbol tvar)
       otherwise                -> throwE $ show arg ++ " found in list of formal arguments"
+
+-- Type of let expressions (let (name expr) body)
+typeofM letexpr@(S.SList [S.SAtom (S.ASymbol "let"), S.SList [S.SAtom (S.ASymbol name), expr],  body]) = go
+  where
+    go = result `catchE` \err -> throwE $ "Error in let expression " ++ show letexpr ++ ": " ++ err
+    result = do
+      exprType <- typeofM expr
+      exprType <- applySubstitutionsM exprType
+      -- create an environment in which name is bound to a forall-closed version of exprType
+      InferState { env = oldEnv } <- get
+      modify (\state -> state { env = Map.insert name (closeOver exprType) (env state) })
+      bodyType <- typeofM body
+      -- restore the original environment
+      modify (\state -> state { env = oldEnv })
+      return bodyType
+typeofM badlet@(S.SList (S.SAtom (S.ASymbol "let") : _)) = throwE $ "Bad let expression: " ++ show badlet
 
 -- type of a redundant pair of parentheses (e)
 typeofM (S.SList [e]) = typeofM e
@@ -230,7 +247,6 @@ exampleEnv = Map.fromList
   , ("ss", tList tString)
   , ("f", tFunc [tInt, tInt, tInt])
   , ("id", TForall "a" $ tFunc [TSymbol "a", TSymbol "a"])
-  , ("unwords", tFunc [ tList tString, tString ])
   , ("show", TForall "a" $ tFunc [TSymbol "a", tString])
   , ("ff", TForall "a" $ tFunc [TSymbol "a", TSymbol "a", TSymbol "a"])
   , ("magic", TForall "a" $ TSymbol "a")
@@ -242,62 +258,68 @@ exampleEnv = Map.fromList
               TParam [TSymbol "m", TSymbol "a"],
               tFunc [TSymbol "a", TParam [TSymbol "m", TSymbol "b"]],
               TParam [TSymbol "m", TSymbol "b"]])
+  , ("pair", TForall "a" $ TForall "b" $ tFunc [ TSymbol "a", TSymbol "b"
+                                               , TParam [TSymbol "Pair", TSymbol "a", TSymbol "b"]])
   ]
 
-eSym s = S.SAtom (S.ASymbol s)
-eInt n = S.SAtom (S.AInt n)
-eStr s = S.SAtom (S.AString s)
-eLst l = S.SList l
-
-exampleExprs :: [SExpr]
-exampleExprs =
-  [ eInt 42
-  , eStr "hello"
-  , eSym "unknown"
-  , eSym "n"
-  , eSym "m"
-  , eSym "true"
-  , eSym "s"
-  , eSym "ss"
-  , eSym "f"
-  , eSym "ff"
-  , eSym "fx"
-  , eSym "fy"
-  , eSym "id"
-  , eSym "magic"
-  , eSym "compute"
-  , eSym ">>="
-  , eLst [ eSym "g", eSym "h" ]
-  , eLst [ eSym "n", eSym "m" ]
-  , eLst [ eSym "f", eSym "n" ]
-  , eLst [ eSym "f", eSym "n", eSym "true" ]
-  , eLst [ eSym "f", eSym "n", eSym "m" ]
-  , eLst [ eSym "id", eSym "n" ]
-  , eLst [ eSym "id", eSym "f" ]
-  , eLst [ eSym "id", eSym "id" ]
-  , eLst [ eSym "id", eSym "magic" ]
-  , eLst [ eSym "ff", eInt 23, eInt 42]
-  , eLst [ eSym "ff", eInt 23, eStr "hello" ]
-  , eLst [ eSym "ff", eInt 23, eSym "magic" ]
-  , eLst [ eSym "ff", eSym "id", eSym "id" ]
-  , eLst [ eSym "ff", eSym "id", eSym "magic" ]
-  , eLst [ eSym "ff", eSym "magic", eSym "id" ]
-  , eLst [ eSym "ff", eSym "fx", eSym "fy" ]
-  , eLst [ eSym "fun", eLst [eSym "x"], eSym "x"]
-  , eLst [ eSym "fun", eLst [eSym "x"], eSym "n"]
-  , eLst [ eSym "fun", eLst [eSym "x"], eLst [ eSym "fx", eSym "x"]]
-  , eLst [ eSym "fun", eLst [eSym "x"], eLst [ eSym "fy", eSym "x"]]
-  , eLst [ eSym "fun", eLst [eSym "f"], eLst [ eSym "f", eSym "n" ]]
-  , eLst [ eSym "fun", eLst [eSym "f"], eLst [ eSym "f", eSym "f" ]]
-  , eLst [ eSym "fun", eLst [eSym "f", eSym "g"], eLst [eSym "fun", eLst [eSym "x"],  eLst [ eSym "f", eLst [eSym "g", eSym "x" ]]]]
-  , eLst [ eSym "do", eLst [eSym "_", eLst [eSym "compute", eInt 42]]]
-  , eLst [ eSym "do",
-           eLst [eSym "n", eLst [eSym "compute", eInt 42]],
-           eLst [eSym "_", eLst [eSym "compute", eLst [eSym "f", eSym "n", eInt 23]]]]
-  , eLst [ eSym "do",
-           eLst [eSym "f", eLst [eSym "compute", eStr "id"]],
-           eLst [eSym "_", eLst [eSym "compute", eLst [eSym "f", eSym "f"]]]]
+exampleExprStrs =
+  [ "42"
+  , "\"hello\""
+  , "unknown"
+  , "n"
+  , "m"
+  , "true"
+  , "false"
+  , "s"
+  , "ss"
+  , "f"
+  , "ff"
+  , "fx"
+  , "fy"
+  , "id"
+  , "magic"
+  , "compute"
+  , ">>="
+  , "pair"
+  , "(g h)"
+  , "(n m)"
+  , "(f n)"
+  , "(f n true)"
+  , "(f n m)"
+  , "(id n)"
+  , "(id f)"
+  , "(id id)"
+  , "(id magic)"
+  , "(ff 23 42)"
+  , "(ff 23 \"hello\")"
+  , "(ff 23 magic)"
+  , "(ff id id)"
+  , "(ff id magic)"
+  , "(ff magic id)"
+  , "(ff fx fy)"
+  , "(fun (x) x)"
+  , "(fun (x) n)"
+  , "(fun (x) (fx x))"
+  , "(fun (x) (fy x))"
+  , "(fun (f) (f n))"
+  , "(fun (f) (f f))"
+  , "(fun (f g) (fun (x) (f (g x))))"
+  , "(do (_ (compute 42)))"
+  , "(do (n (compute 42)) (_ (compute (f n 23))))"
+  , "(do (f (compute id)) (_ (compute (f f))))"
+  , "(let (x n) x)"
+  , "(let (x magic) x)"
+  , "(let (f id) (pair (f 42) (f true)))"
+  , "((fun (f)   (pair (f 42) (f true))) id)"
   ]
+
+parseExpr :: String -> SExpr
+parseExpr source = let
+    presult = readP_to_S S.parseProgram source
+  in case presult of
+    ((expr, "") : _) -> expr
+
+exampleExprs = map parseExpr exampleExprStrs
 
 exampleTypes = map (typeOf exampleEnv) exampleExprs
 

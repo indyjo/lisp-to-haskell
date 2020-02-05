@@ -69,5 +69,6 @@ Now define parsers for the two cases of SExpr and for SExpr itself.
 > parseProgram :: ReadP SExpr
 > parseProgram = do s <- parseSExpr
 >                   skipSpaces
+>                   eof
 >                   return s
 
