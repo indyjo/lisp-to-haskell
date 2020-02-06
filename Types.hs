@@ -17,7 +17,7 @@ data Type = TParam  [Type]        -- parametric type application (T1 ... TN), al
 instance Show Type where
   show (TSymbol s) = s
   show (TParam ts) = "(" ++ (unwords $ map show ts) ++ ")"
-  show (TForall n t) = "forall " ++ n ++ "." ++ show t
+  show (TForall n t) = "∀ " ++ n ++ "." ++ show t
 
 -- Some definitions for types.
 
