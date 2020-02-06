@@ -125,6 +125,12 @@ maybeLookupEnv s = do
 insertEnv :: String -> Type -> Infer ()
 insertEnv n t = modify $ \state -> state { env = Map.insert n t (env state) }
 
+-- inserts or replaces a type var substitution
+substitute :: String -> Type -> Infer ()
+substitute n t = do
+  t' <- applySubstitutionsM t
+  modify (\state -> state { subst = Map.insert n t' (subst state) })
+
 newTypeVar :: Infer String
 newTypeVar = do
   s <- get
@@ -247,7 +253,7 @@ typeofM exp@(S.SList (func:params)) = go
         in verify (nExp == nAct)
                   ("Function expects " ++ show nExp ++ " arguments, but " ++ show nAct ++ " given.")
       -- Match formal and actual argument types
-      forM_ (zip funcTypeParams (zip actualParamTypes params)) (\(a,(b,bExpr)) ->
+      forM_ (zip funcTypeParams (zip actualParamTypes params)) (\(a,(b,bExpr)) -> do
         unify a b `catchE` \e ->
           throwE $ "Error unifying" ++
                    "\n formal argument type " ++ show a ++
@@ -300,8 +306,7 @@ constrain n t = do
   previous <- maybeLookupEnv n
   forM_ previous $ unify t
   -- If that worked, replace t with the unifier
-  t' <- applySubstitutionsM t
-  insertEnv n t'
+  substitute n t
 
 -- Unify takes two types and either finds a unifier by applying substitutions, or throws an error.
 unify :: Type -> Type -> Infer ()

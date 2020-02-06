@@ -7,8 +7,8 @@
 			(_ (compute (> v 1))))
 		(do
 			(v (get n))
-			(_ (update r (* v)))
-			(_ (update n (+ (-1))))
+			(_ (update r (fun (x) (* v x))))
+			(_ (update n (fun (x) (+ x (-1)))))
 		)
 	))
 	(f (get r))
