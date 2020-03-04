@@ -1,4 +1,5 @@
 module Types (Type, Env, Error, Infer, initEnv, typeOf) where
+import Algorithms.NaturalSort
 import Control.Monad (forM, forM_)
 import Control.Monad.Trans.Except (ExceptT, catchE, except, runExcept, runExceptT, throwE)
 import Control.Monad.State.Strict (State, get, put, modify, runState, withState)
@@ -63,11 +64,11 @@ initEnv = Map.fromList
   , ("id", TForall "a" $ tFunc [TSymbol "a", TSymbol "a"])
   , ("show", TForall "a" $ tFunc [TSymbol "a", tString])
   , ("compute", TForall "a" $ tFunc[TSymbol "a", tAction $ TSymbol "a"])
-  , (">>=", TForall "m" $ TForall "a" $ TForall "b" $
+  , (">>=", TForall "a" $ TForall "b" $
             tFunc [
-              TParam [TSymbol "m", TSymbol "a"],
-              tFunc [TSymbol "a", TParam [TSymbol "m", TSymbol "b"]],
-              TParam [TSymbol "m", TSymbol "b"]])
+              TParam [TSymbol "Action", TSymbol "a"],
+              tFunc [TSymbol "a", TParam [TSymbol "Action", TSymbol "b"]],
+              TParam [TSymbol "Action", TSymbol "b"]])
   , ("pair", TForall "a" $ TForall "b" $ tFunc [ TSymbol "a", TSymbol "b"
                                                , TParam [TSymbol "Pair", TSymbol "a", TSymbol "b"]])
   , ("==", TForall "a" $ tFunc [ TSymbol "a", TSymbol "a", TSymbol "Bool" ] )
@@ -130,6 +131,11 @@ substitute :: String -> Type -> Infer ()
 substitute n t = do
   t' <- applySubstitutionsM t
   modify (\state -> state { subst = Map.insert n t' (subst state) })
+
+maybeLookupSubst :: String -> Infer (Maybe Type)
+maybeLookupSubst n = do
+  InferState { subst = subst } <- get
+  return (Map.lookup n subst)
 
 newTypeVar :: Infer String
 newTypeVar = do
@@ -292,7 +298,19 @@ typeOf env expr = runExcept $ do
 
 -- Given the map of substitutions, apply it to the given type and return a new type.
 applySubstitutions :: Subst -> Type -> Type
-applySubstitutions s t = Map.foldrWithKey (\name subst accum -> replaceVar name subst accum) t s
+applySubstitutions s t = go (freeVars t) t
+  where
+    go :: [String] -> Type -> Type
+    go []     t = t
+    go (n:ns) t = let
+        maybeSubst = Map.lookup n s
+        newVars = case maybeSubst of
+          Just subst -> freeVars subst
+          _          -> []
+        tNew = case maybeSubst of
+          Just subst -> replaceVar n subst t
+          _          -> t
+      in go (ns ++ newVars) tNew
 
 applySubstitutionsM :: Type -> Infer Type
 applySubstitutionsM t = do
@@ -302,51 +320,40 @@ applySubstitutionsM t = do
 -- Constrain a type variable to a type t
 constrain :: String -> Type -> Infer ()
 constrain n t = do
-  -- Unify with any previous constraint (i.e., constrain further)
-  previous <- maybeLookupEnv n
-  forM_ previous $ unify t
-  -- If that worked, replace t with the unifier
-  substitute n t
-
+  previous <- maybeLookupSubst n
+  case previous of
+    -- No previous constraint? Substitute.
+    Nothing -> substitute n t
+    -- Previous constraint? Unify.
+    Just t' -> unify t t'
+ 
 -- Unify takes two types and either finds a unifier by applying substitutions, or throws an error.
 unify :: Type -> Type -> Infer ()
+
 unify (TParam xs) (TParam ys) = do
   forM_ (zip xs ys) (\(x, y) -> unify x y)
 
 unify x y | x == y = return ()
 
+unify (TSymbol n) (TSymbol m)
+  | isTypeVar n && isTypeVar m
+    && sortKey n < sortKey m
+  = unify (TSymbol m) (TSymbol n)
 unify (TSymbol n) t | isTypeVar n && not (n `elem` freeVars t) = constrain n t
 unify t (TSymbol n) | isTypeVar n && not (n `elem` freeVars t) = constrain n t
 
 unify x y = throwE $ "Can't unify types: " ++ show x ++ " <-> " ++ show y
 
-exampleEnv = Map.fromList
+exampleEnv = initEnv `Map.union` Map.fromList
   [ ("n", tInt)
   , ("m", tInt)
-  , ("true", tBool)
-  , ("false", tBool)
   , ("s", tString)
   , ("ss", tList tString)
   , ("f", tFunc [tInt, tInt, tInt])
-  , ("id", TForall "a" $ tFunc [TSymbol "a", TSymbol "a"])
-  , ("show", TForall "a" $ tFunc [TSymbol "a", tString])
   , ("ff", TForall "a" $ tFunc [TSymbol "a", TSymbol "a", TSymbol "a"])
   , ("magic", TForall "a" $ TSymbol "a")
   , ("fx", TForall "a" $ tFunc [TSymbol "a", TSymbol "Int"])
   , ("fy", TForall "a" $ tFunc [TSymbol "Int", TSymbol "a"])
-  , ("compute", TForall "a" $ tFunc[TSymbol "a", tAction $ TSymbol "a"])
-  , (">>=", TForall "m" $ TForall "a" $ TForall "b" $
-            tFunc [
-              TParam [TSymbol "m", TSymbol "a"],
-              tFunc [TSymbol "a", TParam [TSymbol "m", TSymbol "b"]],
-              TParam [TSymbol "m", TSymbol "b"]])
-  , ("pair", TForall "a" $ TForall "b" $ tFunc [ TSymbol "a", TSymbol "b"
-                                               , TParam [TSymbol "Pair", TSymbol "a", TSymbol "b"]])
-  , ("==", TForall "a" $ tFunc [ TSymbol "a", TSymbol "a", TSymbol "Bool" ])
-  , ("if", TForall "a" $ tFunc [ TSymbol "Bool", TSymbol "a", TSymbol "a", TSymbol "a" ])
-  , ("+", TForall "a" $ tFunc [ TSymbol "a", TSymbol "a", TSymbol "a" ])
-  , ("*", TForall "a" $ tFunc [ TSymbol "a", TSymbol "a", TSymbol "a" ])
-  , ("cons", TForall "a" $ tFunc [ TSymbol "a", TParam[ TSymbol "List", TSymbol "a" ], TParam[ TSymbol "List", TSymbol "a" ]])
   ]
 
 exampleExprStrs =
@@ -404,6 +411,7 @@ exampleExprStrs =
   , "(let ((inf (+ inf 1))) inf)"
   , "(let ((fac (fun (n) (if (== n 0) 1 (* n (fac (+ n -1))))))) fac)"
   , "(let ( (a (+ b 1)) (b (+ a 1)) ) (pair a b))"
+  , "(fun (f) (fun (x y) (do (xv x) (yv y) (compute (f xv yv)))))"
   ]
 
 parseExpr :: String -> SExpr
